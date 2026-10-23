@@ -30,3 +30,6 @@ Thumbs.db
 # Alembic compiled
 *.pyc
 
+# Take-home case study PDF / prompts
+*.pdf
+

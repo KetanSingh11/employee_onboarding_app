@@ -1,0 +1,48 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: docker.io/library/postgres:16
+    container_name: onboarding_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-onboarding_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-onboarding_pass}
+      POSTGRES_DB: ${POSTGRES_DB:-staffplanner}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./scripts/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql:ro
+    networks:
+      - onboarding-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-onboarding_user} -d ${POSTGRES_DB:-staffplanner}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    container_name: onboarding_app
+    restart: unless-stopped
+    command: uvicorn employee_onboarding_app.main:app --host 0.0.0.0 --port 8000 --workers 4
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-onboarding_user}:${POSTGRES_PASSWORD:-onboarding_pass}@postgres:5432/${POSTGRES_DB:-staffplanner}
+    env_file:
+      - .env
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - onboarding-net
+
+volumes:
+  postgres_data:
+
+networks:
+  onboarding-net:
+    driver: bridge
+
