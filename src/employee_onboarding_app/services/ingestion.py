@@ -2,11 +2,12 @@ import csv
 import io
 import logging
 import uuid
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
 
 from pydantic import ValidationError
-from sqlalchemy import func, select
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from employee_onboarding_app.models import (
@@ -31,7 +32,6 @@ REQUIRED_CSV_COLUMNS = {"email", "first_name", "last_name", "start_date"}
 
 
 class ParsedEmployeeRecord:
-
     def __init__(
         self,
         row_number: int,
@@ -69,19 +69,13 @@ def parse_and_validate_csv_content(
     fieldnames = {col.strip().lower() for col in reader.fieldnames if col}
     missing_required = REQUIRED_CSV_COLUMNS - fieldnames
     if missing_required:
-        raise ValueError(
-            f"Missing required CSV header columns: {sorted(list(missing_required))}"
-        )
+        raise ValueError(f"Missing required CSV header columns: {sorted(list(missing_required))}")
 
     valid_records: list[ParsedEmployeeRecord] = []
     error_reports: list[dict[str, Any]] = []
 
     for row_idx, raw_row in enumerate(reader, start=2):
-        row = {
-            k.strip().lower(): (v.strip() if v else "")
-            for k, v in raw_row.items()
-            if k
-        }
+        row = {k.strip().lower(): (v.strip() if v else "") for k, v in raw_row.items() if k}
 
         email = row.get("email", "")
         # Validate base employee data via Pydantic schema
@@ -93,7 +87,9 @@ def parse_and_validate_csv_content(
                 {
                     "row": row_idx,
                     "email": email,
-                    "reason": f"Invalid start_date format '{row.get('start_date')}'. Expected YYYY-MM-DD",
+                    "reason": (
+                        f"Invalid start_date format '{row.get('start_date')}'. Expected YYYY-MM-DD"
+                    ),
                 }
             )
             continue
@@ -132,7 +128,9 @@ def parse_and_validate_csv_content(
                         {
                             "row": row_idx,
                             "email": email,
-                            "reason": f"Malformed skill token '{token}'. Expected 'skill_name:level'",
+                            "reason": (
+                                f"Malformed skill token '{token}'. Expected 'skill_name:level'"
+                            ),
                         }
                     )
                     skills_valid = False
@@ -144,11 +142,15 @@ def parse_and_validate_csv_content(
                 try:
                     level_enum = ProficiencyLevel(level_str)
                 except ValueError:
+                    allowed_levels = [e.value for e in ProficiencyLevel]
                     error_reports.append(
                         {
                             "row": row_idx,
                             "email": email,
-                            "reason": f"Invalid proficiency level '{level_str}'. Allowed: {[e.value for e in ProficiencyLevel]}",
+                            "reason": (
+                                f"Invalid proficiency level '{level_str}'. "
+                                f"Allowed: {allowed_levels}"
+                            ),
                         }
                     )
                     skills_valid = False
@@ -228,49 +230,64 @@ async def process_batch_ingestion(
             )
             continue
 
-        # 1. Insert Employee with status=PENDING
-        employee = Employee(
-            email=record.email,
-            first_name=record.first_name,
-            last_name=record.last_name,
-            department=record.department,
-            job_title=record.job_title,
-            start_date=record.start_date,
-            status=EmployeeStatus.PENDING,
-        )
-        session.add(employee)
-        await session.flush()
-
-        # 2. Insert Skills (auto-create in master table if absent)
-        for skill_name, level in record.skills:
-            skill_stmt = select(Skill).where(Skill.name == skill_name)
-            skill_res = await session.execute(skill_stmt)
-            skill_obj = skill_res.scalar_one_or_none()
-
-            if not skill_obj:
-                skill_obj = Skill(name=skill_name)
-                session.add(skill_obj)
-                await session.flush()
-
-            mapping = EmployeeSkillMap(
-                employee_id=employee.id,
-                skill_id=skill_obj.id,
-                proficiency_level=level,
+        try:
+            # 1. Insert Employee with status=PENDING
+            employee = Employee(
+                email=record.email,
+                first_name=record.first_name,
+                last_name=record.last_name,
+                department=record.department,
+                job_title=record.job_title,
+                start_date=record.start_date,
+                status=EmployeeStatus.PENDING,
             )
-            session.add(mapping)
+            session.add(employee)
+            await session.flush()
 
-        # 3. Create WorkflowExecution instance
-        workflow = WorkflowExecution(
-            employee_id=employee.id,
-            batch_id=batch_id,
-            workflow_type=WorkflowType.ONBOARDING,
-        )
-        session.add(workflow)
-        await session.flush()
+            # 2. Insert Skills (auto-create in master table if absent)
+            for skill_name, level in record.skills:
+                skill_stmt = select(Skill).where(Skill.name == skill_name)
+                skill_res = await session.execute(skill_stmt)
+                skill_obj = skill_res.scalar_one_or_none()
 
-        # Commit employee + skill persistence BEFORE running saga
-        await session.commit()
-        triggered_onboarding += 1
+                if not skill_obj:
+                    skill_obj = Skill(name=skill_name)
+                    session.add(skill_obj)
+                    await session.flush()
+
+                mapping = EmployeeSkillMap(
+                    employee_id=employee.id,
+                    skill_id=skill_obj.id,
+                    proficiency_level=level,
+                )
+                session.add(mapping)
+
+            # 3. Create WorkflowExecution instance
+            workflow = WorkflowExecution(
+                employee_id=employee.id,
+                batch_id=batch_id,
+                workflow_type=WorkflowType.ONBOARDING,
+            )
+            session.add(workflow)
+            await session.flush()
+
+            # Commit employee + skill persistence BEFORE running saga
+            await session.commit()
+            triggered_onboarding += 1
+        except IntegrityError:
+            await session.rollback()
+            skipped_duplicate += 1
+            report_items.append(
+                {
+                    "row": record.row_number,
+                    "email": record.email,
+                    "reason": (
+                        f"Concurrent duplicate detected: employee with email '{record.email}' "
+                        "was registered simultaneously"
+                    ),
+                }
+            )
+            continue
 
         # 4. Run Saga Workflow Orchestrator
         ctx = WorkflowContext(
@@ -284,9 +301,7 @@ async def process_batch_ingestion(
         try:
             await default_orchestrator.run(session, ctx)
         except Exception as saga_err:
-            logger.error(
-                "Unhandled saga exception for %s: %s", record.email, saga_err
-            )
+            logger.error("Unhandled saga exception for %s: %s", record.email, saga_err)
 
     # 5. Finalize BatchRun record
     batch.valid_rows = len(valid_records)
@@ -313,8 +328,8 @@ async def process_batch_ingestion(
 
 
 async def recover_orphaned_batches(session: AsyncSession) -> int:
-    """Recovers batches left in PROCESSING state after an unexpected worker crash (PostgreSQL-as-Queue pattern)."""
-    stale_threshold = datetime.now(timezone.utc) - timedelta(minutes=10)
+    """Recovers batches left in PROCESSING state after an unexpected worker crash."""
+    stale_threshold = datetime.now(UTC) - timedelta(minutes=10)
     stmt = select(BatchRun).where(
         BatchRun.status == BatchStatus.PROCESSING,
         BatchRun.created_at < stale_threshold,

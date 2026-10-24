@@ -1,9 +1,8 @@
-import json
 import logging
 import uuid
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 from fastapi import FastAPI, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,7 +27,7 @@ logger = logging.getLogger("employee_onboarding_app.main")
 # Application Lifespan: Startup Recovery & Engine Teardown
 # ─────────────────────────────────────────────────────────────
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     logger.info("Initializing Employee Onboarding App...")
 
     # Startup recovery: detect and recover any orphaned batch runs from prior crashes
@@ -73,9 +72,7 @@ app.add_middleware(
 # Request Correlation & Idempotency Middleware
 # ─────────────────────────────────────────────────────────────
 @app.middleware("http")
-async def correlation_and_idempotency_middleware(
-    request: Request, call_next
-) -> Response:
+async def correlation_and_idempotency_middleware(request: Request, call_next) -> Response:
     # 1. Request ID Correlation (ADR-20)
     req_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
 
@@ -97,21 +94,15 @@ async def correlation_and_idempotency_middleware(
             cached_entry = res.scalar_one_or_none()
 
             # Return cached response if key is valid and not expired
-            if cached_entry and cached_entry.expires_at > datetime.now(
-                timezone.utc
-            ):
+            if cached_entry and cached_entry.expires_at > datetime.now(UTC):
                 logger.info(
                     "Idempotency hit for key '%s' on %s",
                     idempotency_key,
                     path,
                 )
                 cached_body = cached_entry.response_body or {}
-                cached_status = (
-                    cached_entry.response_status or status.HTTP_200_OK
-                )
-                response = JSONResponse(
-                    content=cached_body, status_code=cached_status
-                )
+                cached_status = cached_entry.response_status or status.HTTP_200_OK
+                response = JSONResponse(content=cached_body, status_code=cached_status)
                 response.headers["X-Request-ID"] = req_id
                 response.headers["X-Cache"] = "HIT-IDEMPOTENCY"
                 return response
@@ -127,7 +118,7 @@ async def correlation_and_idempotency_middleware(
             try:
                 # Read response body from memory if JSON
                 async with AsyncSessionLocal() as session:
-                    expires_at = datetime.now(timezone.utc) + timedelta(
+                    expires_at = datetime.now(UTC) + timedelta(
                         seconds=settings.IDEMPOTENCY_TTL_SECONDS
                     )
                     entry = IdempotencyKey(
@@ -165,7 +156,7 @@ async def liveness_probe() -> HealthResponse:
     """Liveness probe returning 200 as long as the application process is running."""
     return HealthResponse(
         status="healthy",
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
     )
 
 
@@ -183,7 +174,7 @@ async def readiness_probe() -> ReadinessResponse:
         return ReadinessResponse(
             status="ready",
             database="connected",
-            timestamp=datetime.now(timezone.utc),
+            timestamp=datetime.now(UTC),
         )
     except Exception as db_err:
         logger.error("Readiness probe DB check failed: %s", db_err)
@@ -192,7 +183,7 @@ async def readiness_probe() -> ReadinessResponse:
             content={
                 "status": "unready",
                 "database": f"disconnected: {db_err}",
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
             },
         )
 

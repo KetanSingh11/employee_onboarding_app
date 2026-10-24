@@ -3,6 +3,7 @@ from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from employee_onboarding_app.api.deps import (
@@ -39,9 +40,7 @@ async def list_skills(
     session: AsyncSession = Depends(get_db),
     _role: str = Depends(require_viewer),
 ) -> list[SkillRead]:
-    stmt = (
-        select(Skill).order_by(Skill.name.asc()).offset(offset).limit(limit)
-    )
+    stmt = select(Skill).order_by(Skill.name.asc()).offset(offset).limit(limit)
     result = await session.execute(stmt)
     skills = result.scalars().all()
     return [SkillRead.model_validate(s) for s in skills]
@@ -72,14 +71,19 @@ async def assign_skill_to_employee(
             detail=f"Employee '{employee_id}' not found",
         )
 
-    # 2. Get or create skill in master catalog (lowercase normalized)
+    # 2. Get or create skill in master catalog (race-condition safe with savepoint)
     skill_stmt = select(Skill).where(Skill.name == payload.skill_name)
     skill_res = await session.execute(skill_stmt)
     skill = skill_res.scalar_one_or_none()
     if not skill:
-        skill = Skill(name=payload.skill_name)
-        session.add(skill)
-        await session.flush()
+        try:
+            async with session.begin_nested():
+                skill = Skill(name=payload.skill_name)
+                session.add(skill)
+                await session.flush()
+        except IntegrityError:
+            skill_res = await session.execute(skill_stmt)
+            skill = skill_res.scalar_one()
 
     # 3. Check if mapping already exists
     map_stmt = select(EmployeeSkillMap).where(

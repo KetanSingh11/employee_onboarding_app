@@ -16,7 +16,6 @@ from employee_onboarding_app.models import (
     validate_employee_transition,
 )
 from employee_onboarding_app.workflow.alert import (
-    StructuredLogAdapter,
     default_alert_service,
 )
 from employee_onboarding_app.workflow.base import (
@@ -82,16 +81,12 @@ class SagaOrchestrator:
         ctx: WorkflowContext,
     ) -> WorkflowStatus:
         """Executes the full onboarding saga for the provided context."""
-        stmt = select(WorkflowExecution).where(
-            WorkflowExecution.id == ctx.workflow_id
-        )
+        stmt = select(WorkflowExecution).where(WorkflowExecution.id == ctx.workflow_id)
         result = await session.execute(stmt)
         workflow = result.scalar_one_or_none()
 
         if not workflow:
-            raise ValueError(
-                f"WorkflowExecution {ctx.workflow_id} does not exist"
-            )
+            raise ValueError(f"WorkflowExecution {ctx.workflow_id} does not exist")
 
         workflow.status = WorkflowStatus.IN_PROGRESS
         await session.flush()
@@ -147,9 +142,7 @@ class SagaOrchestrator:
 
                 # Re-fetch workflow instance in fresh transaction
                 refetched = await session.execute(
-                    select(WorkflowExecution).where(
-                        WorkflowExecution.id == ctx.workflow_id
-                    )
+                    select(WorkflowExecution).where(WorkflowExecution.id == ctx.workflow_id)
                 )
                 workflow = refetched.scalar_one()
                 workflow.status = WorkflowStatus.ROLLING_BACK
@@ -190,11 +183,7 @@ class SagaOrchestrator:
         # ─────────────────────────────────────────────────────────
         # Finalization Phase: Successful Onboarding
         # ─────────────────────────────────────────────────────────
-        emp_stmt = (
-            select(Employee)
-            .where(Employee.id == ctx.employee_id)
-            .with_for_update()
-        )
+        emp_stmt = select(Employee).where(Employee.id == ctx.employee_id).with_for_update()
         emp_result = await session.execute(emp_stmt)
         employee = emp_result.scalar_one()
 

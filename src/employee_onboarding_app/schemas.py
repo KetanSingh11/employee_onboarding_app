@@ -106,9 +106,7 @@ class EmployeeBase(BaseModel):
     def validate_start_date_not_past(cls, v: date) -> date:
         today = date.today()
         if v < today:
-            raise ValueError(
-                f"start_date cannot be in the past ({v} < {today})"
-            )
+            raise ValueError(f"start_date cannot be in the past ({v} < {today})")
         return v
 
 

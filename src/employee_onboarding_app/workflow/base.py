@@ -38,22 +38,18 @@ class WorkflowContext:
 
 
 class WorkflowStep(ABC):
-    """Abstract Base Class for an atomic, idempotent saga workflow step (SOLID Open/Closed Principle)."""
+    """Abstract Base Class for an atomic, idempotent saga workflow step (SOLID OCP)."""
 
     step_number: int
     step_name: str
 
     @abstractmethod
-    async def execute(
-        self, session: AsyncSession, ctx: WorkflowContext
-    ) -> WorkflowContext:
+    async def execute(self, session: AsyncSession, ctx: WorkflowContext) -> WorkflowContext:
         """Executes the forward operational step. Must be idempotent."""
         pass
 
     @abstractmethod
-    async def compensate(
-        self, session: AsyncSession, ctx: WorkflowContext
-    ) -> None:
+    async def compensate(self, session: AsyncSession, ctx: WorkflowContext) -> None:
         """Executes the compensating (rollback) action for this step. Must be idempotent."""
         pass
 
@@ -62,14 +58,9 @@ class AlertService(ABC):
     """Abstract Base Class for workflow event notification and alerting."""
 
     @abstractmethod
-    def info(
-        self, message: str, context: dict[str, Any] | None = None
-    ) -> None:
+    def info(self, message: str, context: dict[str, Any] | None = None) -> None:
         pass
 
     @abstractmethod
-    def error(
-        self, message: str, context: dict[str, Any] | None = None
-    ) -> None:
+    def error(self, message: str, context: dict[str, Any] | None = None) -> None:
         pass
-

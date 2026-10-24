@@ -1,10 +1,22 @@
 from collections.abc import Callable
+
 from fastapi import Depends, HTTPException, Security, status
 from fastapi.security import APIKeyHeader
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from employee_onboarding_app.config import settings
 from employee_onboarding_app.database import get_db
+
+__all__ = [
+    "get_db",
+    "get_current_role",
+    "require_role",
+    "require_viewer",
+    "require_hr",
+    "require_admin",
+    "ROLE_ADMIN",
+    "ROLE_HR",
+    "ROLE_VIEWER",
+]
 
 api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
 
@@ -16,7 +28,7 @@ ROLE_VIEWER = "viewer"
 async def get_current_role(
     api_key: str | None = Security(api_key_header),
 ) -> str:
-    """Resolves and validates the API key provided in the X-API-Key header to its corresponding role context."""
+    """Resolves and validates the API key provided in the X-API-Key header."""
     if not api_key:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -45,7 +57,7 @@ def require_role(allowed_roles: list[str]) -> Callable[..., str]:
         if role not in allowed_roles:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
-                detail=f"Forbidden: role '{role}' does not have sufficient permissions for this operation",
+                detail=f"Forbidden: role '{role}' does not have sufficient permissions",
             )
         return role
 

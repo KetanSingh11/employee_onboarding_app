@@ -1,3 +1,4 @@
+import contextlib
 import uuid
 
 from fastapi import (
@@ -21,7 +22,6 @@ from employee_onboarding_app.models import (
     BatchRun,
     Employee,
     EmployeeStatus,
-    WorkflowAuditLog,
     WorkflowExecution,
     WorkflowStatus,
     WorkflowType,
@@ -51,10 +51,8 @@ async def _run_retry_saga_background(
             employee_email=employee_email,
             workflow_id=new_workflow_id,
         )
-        try:
+        with contextlib.suppress(Exception):
             await default_orchestrator.run(session, ctx)
-        except Exception:
-            pass
 
 
 # ─────────────────────────────────────────────────────────────
@@ -83,9 +81,7 @@ async def get_workflow_status(
             detail=f"Workflow execution '{workflow_id}' not found",
         )
 
-    audit_reads = [
-        WorkflowAuditLogRead.model_validate(log) for log in wf.audit_logs
-    ]
+    audit_reads = [WorkflowAuditLogRead.model_validate(log) for log in wf.audit_logs]
 
     return WorkflowExecutionRead(
         id=wf.id,
@@ -117,9 +113,7 @@ async def retry_failed_workflow(
     _role: str = Depends(require_hr),
 ) -> WorkflowRetryResponse:
     # 1. Fetch failed workflow
-    stmt = select(WorkflowExecution).where(
-        WorkflowExecution.id == workflow_id
-    )
+    stmt = select(WorkflowExecution).where(WorkflowExecution.id == workflow_id)
     res = await session.execute(stmt)
     old_wf = res.scalar_one_or_none()
     if not old_wf:
@@ -132,7 +126,10 @@ async def retry_failed_workflow(
     if old_wf.status not in {WorkflowStatus.FAILED, WorkflowStatus.ROLLED_BACK}:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"Cannot retry workflow with status '{old_wf.status.value}'. Must be FAILED or ROLLED_BACK.",
+            detail=(
+                f"Cannot retry workflow with status '{old_wf.status.value}'. "
+                "Must be FAILED or ROLLED_BACK."
+            ),
         )
 
     # 3. Check for any currently active workflow for the same employee
@@ -154,11 +151,7 @@ async def retry_failed_workflow(
         )
 
     # 4. Fetch employee and reset status to PENDING
-    emp_stmt = (
-        select(Employee)
-        .where(Employee.id == old_wf.employee_id)
-        .with_for_update()
-    )
+    emp_stmt = select(Employee).where(Employee.id == old_wf.employee_id).with_for_update()
     emp_res = await session.execute(emp_stmt)
     emp = emp_res.scalar_one_or_none()
     if not emp:
@@ -219,4 +212,3 @@ async def get_batch_run_status(
             detail=f"Batch run '{batch_id}' not found",
         )
     return BatchRunRead.model_validate(batch)
-
