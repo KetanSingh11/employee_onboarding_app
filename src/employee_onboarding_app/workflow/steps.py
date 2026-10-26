@@ -1,4 +1,5 @@
 import logging
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,14 +31,8 @@ class EmployeeActivationStep(WorkflowStep):
     step_number = 1
     step_name = "employee_activation"
 
-    async def execute(
-        self, session: AsyncSession, ctx: WorkflowContext
-    ) -> WorkflowContext:
-        stmt = (
-            select(Employee)
-            .where(Employee.id == ctx.employee_id)
-            .with_for_update()
-        )
+    async def execute(self, session: AsyncSession, ctx: WorkflowContext) -> WorkflowContext:
+        stmt = select(Employee).where(Employee.id == ctx.employee_id).with_for_update()
         result = await session.execute(stmt)
         employee = result.scalar_one_or_none()
 
@@ -56,20 +51,12 @@ class EmployeeActivationStep(WorkflowStep):
         employee.status = EmployeeStatus.ONBOARDING
         await session.flush()
 
-        logger.info(
-            "Employee %s status transitioned to ONBOARDING", ctx.employee_email
-        )
+        logger.info("Employee %s status transitioned to ONBOARDING", ctx.employee_email)
         return ctx
 
-    async def compensate(
-        self, session: AsyncSession, ctx: WorkflowContext
-    ) -> None:
+    async def compensate(self, session: AsyncSession, ctx: WorkflowContext) -> None:
         """Rollback: Marks employee record as FAILED. Never deletes data or skills."""
-        stmt = (
-            select(Employee)
-            .where(Employee.id == ctx.employee_id)
-            .with_for_update()
-        )
+        stmt = select(Employee).where(Employee.id == ctx.employee_id).with_for_update()
         result = await session.execute(stmt)
         employee = result.scalar_one_or_none()
 
@@ -94,9 +81,7 @@ class ITProvisioningStep(WorkflowStep):
     step_number = 2
     step_name = "it_provisioning"
 
-    async def execute(
-        self, session: AsyncSession, ctx: WorkflowContext
-    ) -> WorkflowContext:
+    async def execute(self, session: AsyncSession, ctx: WorkflowContext) -> WorkflowContext:
         # Check for simulated failure injection
         if ctx.simulate_failure == "it":
             logger.warning(
@@ -112,9 +97,7 @@ class ITProvisioningStep(WorkflowStep):
         account_id = f"IT-ACC-{ctx.employee_id.hex[:8].upper()}"
         ctx.it_account_id = account_id
         ctx.extra_data["it_email_created"] = ctx.employee_email
-        ctx.extra_data["it_slack_user_id"] = (
-            f"U{ctx.employee_id.hex[:8].upper()}"
-        )
+        ctx.extra_data["it_slack_user_id"] = f"U{ctx.employee_id.hex[:8].upper()}"
 
         logger.info(
             "IT Provisioning completed for %s [Account: %s]",
@@ -123,9 +106,7 @@ class ITProvisioningStep(WorkflowStep):
         )
         return ctx
 
-    async def compensate(
-        self, session: AsyncSession, ctx: WorkflowContext
-    ) -> None:
+    async def compensate(self, session: AsyncSession, ctx: WorkflowContext) -> None:
         """Rollback: Deprovisions any created IT accounts."""
         if ctx.it_account_id:
             logger.info(
@@ -149,9 +130,7 @@ class SecurityAccessStep(WorkflowStep):
     step_number = 3
     step_name = "security_access"
 
-    async def execute(
-        self, session: AsyncSession, ctx: WorkflowContext
-    ) -> WorkflowContext:
+    async def execute(self, session: AsyncSession, ctx: WorkflowContext) -> WorkflowContext:
         # Check for simulated failure injection
         if ctx.simulate_failure == "security":
             logger.warning(
@@ -176,9 +155,7 @@ class SecurityAccessStep(WorkflowStep):
         )
         return ctx
 
-    async def compensate(
-        self, session: AsyncSession, ctx: WorkflowContext
-    ) -> None:
+    async def compensate(self, session: AsyncSession, ctx: WorkflowContext) -> None:
         """Rollback: Revokes issued badges, VPN profiles, and IAM privileges."""
         if ctx.security_profile_id:
             logger.info(

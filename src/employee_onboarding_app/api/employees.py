@@ -12,7 +12,7 @@ from fastapi import (
     UploadFile,
     status,
 )
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -22,6 +22,7 @@ from employee_onboarding_app.api.deps import (
     require_hr,
     require_viewer,
 )
+from employee_onboarding_app.config import settings
 from employee_onboarding_app.database import AsyncSessionLocal
 from employee_onboarding_app.models import (
     BatchRun,
@@ -105,23 +106,60 @@ async def import_employees_csv(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     simulate_failure: Annotated[str | None, Header(alias="X-Simulate-Failure")] = None,
+    idempotency_key: Annotated[
+        str | None,
+        Header(
+            alias="Idempotency-Key",
+            description="Optional client-generated UUID for idempotency protection on retries",
+        ),
+    ] = None,
     session: AsyncSession = Depends(get_db),
     _role: str = Depends(require_hr),
 ) -> BatchIngestAcceptedResponse:
     if not file.filename or not file.filename.endswith((".csv", ".txt")):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Uploaded file must be a valid .csv file",
+            detail="Uploaded file must be a valid .csv or .txt file",
         )
 
-    content_bytes = await file.read()
+    # Validate Content-Type if present
+    allowed_content_types = {
+        "text/csv",
+        "text/plain",
+        "application/vnd.ms-excel",
+        "application/csv",
+        "text/x-csv",
+        "application/octet-stream",
+    }
+    if file.content_type and file.content_type.lower() not in allowed_content_types:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=f"Unsupported file type '{file.content_type}'. Must be CSV or plain text.",
+        )
+
+    # Non-blocking chunked streaming with configurable size cap (prevents OOM on large files)
+    max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    chunks: list[bytes] = []
+    total_bytes = 0
+    chunk_size = 64 * 1024  # 64 KB per chunk
+
+    while chunk := await file.read(chunk_size):
+        total_bytes += len(chunk)
+        if total_bytes > max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                detail=f"File exceeds maximum allowed limit of {settings.MAX_UPLOAD_SIZE_MB}MB",
+            )
+        chunks.append(chunk)
+
+    content_bytes = b"".join(chunks)
     try:
         csv_text = content_bytes.decode("utf-8")
-    except UnicodeDecodeError:
+    except UnicodeDecodeError as err:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="CSV file must be UTF-8 encoded",
-        )
+        ) from err
 
     if not csv_text.strip():
         raise HTTPException(
@@ -150,7 +188,10 @@ async def import_employees_csv(
         batch_id=batch.id,
         filename=file.filename,
         status=BatchStatus.PROCESSING,
-        message="CSV ingestion accepted for background processing. Poll /api/v1/batches/{batch_id} for status.",
+        message=(
+            "CSV ingestion accepted for background processing. "
+            "Poll /api/v1/batches/{batch_id} for status."
+        ),
     )
 
 
@@ -163,16 +204,12 @@ async def import_employees_csv(
     summary="List and filter employees by skill, minimum proficiency, department, and status",
 )
 async def list_employees(
-    skill: Annotated[
-        str | None, Query(description="Filter by specific skill name")
-    ] = None,
+    skill: Annotated[str | None, Query(description="Filter by specific skill name")] = None,
     min_proficiency: Annotated[
         ProficiencyLevel | None,
         Query(description="Filter by minimum required proficiency level"),
     ] = None,
-    department: Annotated[
-        str | None, Query(description="Filter by department")
-    ] = None,
+    department: Annotated[str | None, Query(description="Filter by department")] = None,
     employee_status: Annotated[
         EmployeeStatus | None,
         Query(alias="status", description="Filter by employee lifecycle status"),
@@ -184,9 +221,7 @@ async def list_employees(
 ) -> list[EmployeeRead]:
     stmt = (
         select(Employee)
-        .options(
-            selectinload(Employee.skills).selectinload(EmployeeSkillMap.skill)
-        )
+        .options(selectinload(Employee.skills).selectinload(EmployeeSkillMap.skill))
         .order_by(Employee.created_at.desc())
     )
 
@@ -196,37 +231,28 @@ async def list_employees(
     if employee_status:
         stmt = stmt.where(Employee.status == employee_status)
 
+    # Pushdown skill & minimum proficiency filter into PostgreSQL query
+    if skill or min_proficiency:
+        clean_skill = skill.strip().lower() if skill else None
+        min_rank = PROFICIENCY_RANK[min_proficiency] if min_proficiency else 1
+        qualifying_levels = [lvl for lvl, rank in PROFICIENCY_RANK.items() if rank >= min_rank]
+
+        skill_subquery = (
+            select(EmployeeSkillMap.employee_id)
+            .join(Skill, Skill.id == EmployeeSkillMap.skill_id)
+            .where(EmployeeSkillMap.proficiency_level.in_(qualifying_levels))
+        )
+        if clean_skill:
+            skill_subquery = skill_subquery.where(Skill.name == clean_skill)
+
+        stmt = stmt.where(Employee.id.in_(skill_subquery))
+
+    # Apply pagination directly at the database engine level (safe for 1M+ rows)
+    stmt = stmt.offset(offset).limit(limit)
     result = await session.execute(stmt)
     employees = result.scalars().all()
 
-    # Apply Skill & Minimum Proficiency filtering
-    filtered_employees: list[Employee] = []
-    clean_skill = skill.strip().lower() if skill else None
-    min_rank = PROFICIENCY_RANK[min_proficiency] if min_proficiency else None
-
-    for emp in employees:
-        if clean_skill or min_rank:
-            matches_skill_criteria = False
-            for m in emp.skills:
-                skill_name = m.skill.name if m.skill else ""
-                rank = PROFICIENCY_RANK.get(m.proficiency_level, 0)
-
-                # Check name match
-                name_match = (clean_skill is None) or (skill_name == clean_skill)
-                # Check proficiency rank
-                rank_match = (min_rank is None) or (rank >= min_rank)
-
-                if name_match and rank_match:
-                    matches_skill_criteria = True
-                    break
-
-            if matches_skill_criteria:
-                filtered_employees.append(emp)
-        else:
-            filtered_employees.append(emp)
-
-    paginated = filtered_employees[offset : offset + limit]
-    return [_to_employee_read(e) for e in paginated]
+    return [_to_employee_read(e) for e in employees]
 
 
 # ─────────────────────────────────────────────────────────────
@@ -245,9 +271,7 @@ async def get_employee_by_id(
     stmt = (
         select(Employee)
         .where(Employee.id == employee_id)
-        .options(
-            selectinload(Employee.skills).selectinload(EmployeeSkillMap.skill)
-        )
+        .options(selectinload(Employee.skills).selectinload(EmployeeSkillMap.skill))
     )
     result = await session.execute(stmt)
     emp = result.scalar_one_or_none()
@@ -268,6 +292,13 @@ async def get_employee_by_id(
 )
 async def trigger_offboarding(
     employee_id: uuid.UUID,
+    idempotency_key: Annotated[
+        str | None,
+        Header(
+            alias="Idempotency-Key",
+            description="Optional client-generated UUID for idempotency protection on retries",
+        ),
+    ] = None,
     session: AsyncSession = Depends(get_db),
     _role: str = Depends(require_admin),
 ) -> dict[str, str]:
@@ -282,7 +313,10 @@ async def trigger_offboarding(
 
     # Skeletal placeholder indication per ADR-10
     return {
-        "message": f"Offboarding workflow scheduled for employee '{emp.email}' (Skeletal placeholder per ADR-10)",
+        "message": (
+            f"Offboarding workflow scheduled for employee '{emp.email}' "
+            "(Skeletal placeholder per ADR-10)"
+        ),
         "employee_id": str(employee_id),
         "status": "OFFBOARDING_SCHEDULED",
     }

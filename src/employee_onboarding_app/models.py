@@ -25,7 +25,7 @@ from employee_onboarding_app.database import Base
 # ─────────────────────────────────────────────────────────────
 # Enums
 # ─────────────────────────────────────────────────────────────
-class EmployeeStatus(str, enum.Enum):
+class EmployeeStatus(enum.StrEnum):
     PENDING = "PENDING"
     ONBOARDING = "ONBOARDING"
     ACTIVE = "ACTIVE"
@@ -35,12 +35,12 @@ class EmployeeStatus(str, enum.Enum):
     OFFBOARDING_FAILED = "OFFBOARDING_FAILED"
 
 
-class WorkflowType(str, enum.Enum):
+class WorkflowType(enum.StrEnum):
     ONBOARDING = "ONBOARDING"
     OFFBOARDING = "OFFBOARDING"
 
 
-class WorkflowStatus(str, enum.Enum):
+class WorkflowStatus(enum.StrEnum):
     PENDING = "PENDING"
     IN_PROGRESS = "IN_PROGRESS"
     COMPLETED = "COMPLETED"
@@ -49,25 +49,25 @@ class WorkflowStatus(str, enum.Enum):
     ROLLED_BACK = "ROLLED_BACK"
 
 
-class StepDirection(str, enum.Enum):
+class StepDirection(enum.StrEnum):
     FORWARD = "FORWARD"
     COMPENSATE = "COMPENSATE"
 
 
-class StepStatus(str, enum.Enum):
+class StepStatus(enum.StrEnum):
     STARTED = "STARTED"
     SUCCESS = "SUCCESS"
     FAILED = "FAILED"
 
 
-class ProficiencyLevel(str, enum.Enum):
+class ProficiencyLevel(enum.StrEnum):
     BEGINNER = "beginner"
     INTERMEDIATE = "intermediate"
     ADVANCED = "advanced"
     EXPERT = "expert"
 
 
-class BatchStatus(str, enum.Enum):
+class BatchStatus(enum.StrEnum):
     PROCESSING = "PROCESSING"
     COMPLETED = "COMPLETED"
     PARTIALLY_COMPLETED = "PARTIALLY_COMPLETED"
@@ -101,9 +101,7 @@ VALID_TRANSITIONS: dict[EmployeeStatus, set[EmployeeStatus]] = {
 }
 
 
-def validate_employee_transition(
-    current: EmployeeStatus, target: EmployeeStatus
-) -> None:
+def validate_employee_transition(current: EmployeeStatus, target: EmployeeStatus) -> None:
     if target not in VALID_TRANSITIONS.get(current, set()):
         raise InvalidStateTransitionError(current, target)
 
@@ -114,12 +112,8 @@ def validate_employee_transition(
 class Employee(Base):
     __tablename__ = "employees"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    email: Mapped[str] = mapped_column(
-        String(255), unique=True, index=True, nullable=False
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    email: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
     first_name: Mapped[str] = mapped_column(String(100), nullable=False)
     last_name: Mapped[str] = mapped_column(String(100), nullable=False)
     department: Mapped[str | None] = mapped_column(String(100), nullable=True)
@@ -141,13 +135,13 @@ class Employee(Base):
     )
 
     # Relationships
-    skills: Mapped[list["EmployeeSkillMap"]] = relationship(
+    skills: Mapped[list[EmployeeSkillMap]] = relationship(
         "EmployeeSkillMap",
         back_populates="employee",
         cascade="all, delete-orphan",
         lazy="selectin",
     )
-    workflows: Mapped[list["WorkflowExecution"]] = relationship(
+    workflows: Mapped[list[WorkflowExecution]] = relationship(
         "WorkflowExecution", back_populates="employee", cascade="all, delete-orphan"
     )
 
@@ -155,12 +149,8 @@ class Employee(Base):
 class Skill(Base):
     __tablename__ = "skills"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    name: Mapped[str] = mapped_column(
-        String(100), unique=True, index=True, nullable=False
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    name: Mapped[str] = mapped_column(String(100), unique=True, index=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -172,22 +162,16 @@ class Skill(Base):
     )
 
     # Relationships
-    employee_maps: Mapped[list["EmployeeSkillMap"]] = relationship(
+    employee_maps: Mapped[list[EmployeeSkillMap]] = relationship(
         "EmployeeSkillMap", back_populates="skill"
     )
 
 
 class EmployeeSkillMap(Base):
     __tablename__ = "employee_skill_map"
-    __table_args__ = (
-        UniqueConstraint(
-            "employee_id", "skill_id", name="uq_employee_skill_unique"
-        ),
-    )
+    __table_args__ = (UniqueConstraint("employee_id", "skill_id", name="uq_employee_skill_unique"),)
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     employee_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("employees.id", ondelete="CASCADE"),
@@ -212,20 +196,14 @@ class EmployeeSkillMap(Base):
     )
 
     # Relationships
-    employee: Mapped["Employee"] = relationship(
-        "Employee", back_populates="skills"
-    )
-    skill: Mapped["Skill"] = relationship(
-        "Skill", back_populates="employee_maps", lazy="selectin"
-    )
+    employee: Mapped[Employee] = relationship("Employee", back_populates="skills")
+    skill: Mapped[Skill] = relationship("Skill", back_populates="employee_maps", lazy="selectin")
 
 
 class BatchRun(Base):
     __tablename__ = "batch_runs"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     filename: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[BatchStatus] = mapped_column(
         Enum(BatchStatus, name="batch_status_enum", native_enum=True),
@@ -234,18 +212,10 @@ class BatchRun(Base):
     )
     total_rows: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     valid_rows: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
-    skipped_invalid: Mapped[int] = mapped_column(
-        Integer, default=0, nullable=False
-    )
-    skipped_duplicate: Mapped[int] = mapped_column(
-        Integer, default=0, nullable=False
-    )
-    triggered_onboarding: Mapped[int] = mapped_column(
-        Integer, default=0, nullable=False
-    )
-    report: Mapped[list[dict[str, Any]] | None] = mapped_column(
-        JSONB, nullable=True
-    )
+    skipped_invalid: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    skipped_duplicate: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    triggered_onboarding: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    report: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONB, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -257,7 +227,7 @@ class BatchRun(Base):
     )
 
     # Relationships
-    workflows: Mapped[list["WorkflowExecution"]] = relationship(
+    workflows: Mapped[list[WorkflowExecution]] = relationship(
         "WorkflowExecution", back_populates="batch_run"
     )
 
@@ -270,15 +240,11 @@ class WorkflowExecution(Base):
             "uq_one_active_workflow_per_employee",
             "employee_id",
             unique=True,
-            postgresql_where=text(
-                "status NOT IN ('COMPLETED', 'ROLLED_BACK', 'FAILED')"
-            ),
+            postgresql_where=text("status NOT IN ('COMPLETED', 'ROLLED_BACK', 'FAILED')"),
         ),
     )
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     employee_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("employees.id", ondelete="CASCADE"),
@@ -300,9 +266,7 @@ class WorkflowExecution(Base):
         default=WorkflowStatus.PENDING,
         nullable=False,
     )
-    current_step: Mapped[int] = mapped_column(
-        Integer, default=0, nullable=False
-    )
+    current_step: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
@@ -315,13 +279,9 @@ class WorkflowExecution(Base):
     )
 
     # Relationships
-    employee: Mapped["Employee"] = relationship(
-        "Employee", back_populates="workflows"
-    )
-    batch_run: Mapped["BatchRun | None"] = relationship(
-        "BatchRun", back_populates="workflows"
-    )
-    audit_logs: Mapped[list["WorkflowAuditLog"]] = relationship(
+    employee: Mapped[Employee] = relationship("Employee", back_populates="workflows")
+    batch_run: Mapped[BatchRun | None] = relationship("BatchRun", back_populates="workflows")
+    audit_logs: Mapped[list[WorkflowAuditLog]] = relationship(
         "WorkflowAuditLog",
         back_populates="workflow_execution",
         cascade="all, delete-orphan",
@@ -333,9 +293,7 @@ class WorkflowExecution(Base):
 class WorkflowAuditLog(Base):
     __tablename__ = "workflow_audit_logs"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
     workflow_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True),
         ForeignKey("workflow_executions.id", ondelete="CASCADE"),
@@ -365,7 +323,7 @@ class WorkflowAuditLog(Base):
     )
 
     # Relationships
-    workflow_execution: Mapped["WorkflowExecution"] = relationship(
+    workflow_execution: Mapped[WorkflowExecution] = relationship(
         "WorkflowExecution", back_populates="audit_logs"
     )
 
@@ -373,17 +331,11 @@ class WorkflowAuditLog(Base):
 class IdempotencyKey(Base):
     __tablename__ = "idempotency_keys"
 
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    key: Mapped[str] = mapped_column(
-        String(255), unique=True, index=True, nullable=False
-    )
+    id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    key: Mapped[str] = mapped_column(String(255), unique=True, index=True, nullable=False)
     endpoint: Mapped[str] = mapped_column(String(255), nullable=False)
     response_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
-    response_body: Mapped[dict[str, Any] | None] = mapped_column(
-        JSONB, nullable=True
-    )
+    response_body: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     expires_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, index=True
     )

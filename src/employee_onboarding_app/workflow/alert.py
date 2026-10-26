@@ -1,6 +1,6 @@
 import json
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from employee_onboarding_app.workflow.base import AlertService
@@ -25,7 +25,7 @@ class StructuredLogAdapter(AlertService):
         context: dict[str, Any] | None = None,
     ) -> str:
         payload = {
-            "timestamp": datetime.now(timezone.utc).isoformat(),
+            "timestamp": datetime.now(UTC).isoformat(),
             "service": self.service_name,
             "level": level,
             "message": message,
@@ -33,15 +33,11 @@ class StructuredLogAdapter(AlertService):
         }
         return json.dumps(payload, default=str)
 
-    def info(
-        self, message: str, context: dict[str, Any] | None = None
-    ) -> None:
+    def info(self, message: str, context: dict[str, Any] | None = None) -> None:
         formatted = self._format_payload("INFO", message, context)
         logger.info(formatted)
 
-    def error(
-        self, message: str, context: dict[str, Any] | None = None
-    ) -> None:
+    def error(self, message: str, context: dict[str, Any] | None = None) -> None:
         formatted = self._format_payload("ERROR", message, context)
         logger.error(formatted)
 

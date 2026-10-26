@@ -1,0 +1,5 @@
+email,first_name,last_name,department,job_title,start_date,skills
+alex.morgan@company.com,Alex,Morgan,Engineering,Cloud Architect,2026-11-01,"Kubernetes:expert;Python:advanced"
+sarah.connor@company.com,Sarah,Connor,Security,SecOps Lead,2026-11-15,"Kubernetes:intermediate;Docker:advanced"
+jordan.lee@company.com,Jordan,Lee,Engineering,Backend Developer,2026-12-01,"Python:expert;FastAPI:advanced;Kubernetes:advanced"
+

@@ -1,4 +1,5 @@
 from functools import lru_cache
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -27,6 +28,9 @@ class Settings(BaseSettings):
 
     # Idempotency cache duration
     IDEMPOTENCY_TTL_SECONDS: int = 86400  # 24 hours
+
+    # File upload limits
+    MAX_UPLOAD_SIZE_MB: int = 10
 
     model_config = SettingsConfigDict(
         env_file=".env",

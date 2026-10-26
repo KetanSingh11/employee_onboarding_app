@@ -1,8 +1,9 @@
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Response, status
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from employee_onboarding_app.api.deps import (
@@ -39,9 +40,7 @@ async def list_skills(
     session: AsyncSession = Depends(get_db),
     _role: str = Depends(require_viewer),
 ) -> list[SkillRead]:
-    stmt = (
-        select(Skill).order_by(Skill.name.asc()).offset(offset).limit(limit)
-    )
+    stmt = select(Skill).order_by(Skill.name.asc()).offset(offset).limit(limit)
     result = await session.execute(stmt)
     skills = result.scalars().all()
     return [SkillRead.model_validate(s) for s in skills]
@@ -59,11 +58,12 @@ async def list_skills(
 async def assign_skill_to_employee(
     employee_id: uuid.UUID,
     payload: EmployeeSkillAssignment,
+    response: Response,
     session: AsyncSession = Depends(get_db),
     _role: str = Depends(require_hr),
 ) -> EmployeeSkillRead:
-    # 1. Verify employee exists
-    emp_stmt = select(Employee).where(Employee.id == employee_id)
+    # 1. Verify employee exists with row-level lock
+    emp_stmt = select(Employee).where(Employee.id == employee_id).with_for_update()
     emp_res = await session.execute(emp_stmt)
     employee = emp_res.scalar_one_or_none()
     if not employee:
@@ -72,37 +72,54 @@ async def assign_skill_to_employee(
             detail=f"Employee '{employee_id}' not found",
         )
 
-    # 2. Get or create skill in master catalog (lowercase normalized)
+    # 2. Get or create skill in master catalog (race-condition safe with savepoint)
     skill_stmt = select(Skill).where(Skill.name == payload.skill_name)
     skill_res = await session.execute(skill_stmt)
     skill = skill_res.scalar_one_or_none()
     if not skill:
-        skill = Skill(name=payload.skill_name)
-        session.add(skill)
-        await session.flush()
+        try:
+            async with session.begin_nested():
+                skill = Skill(name=payload.skill_name)
+                session.add(skill)
+                await session.flush()
+        except IntegrityError:
+            skill_res = await session.execute(skill_stmt)
+            skill = skill_res.scalar_one()
 
-    # 3. Check if mapping already exists
-    map_stmt = select(EmployeeSkillMap).where(
-        EmployeeSkillMap.employee_id == employee_id,
-        EmployeeSkillMap.skill_id == skill.id,
+    # 3. Check if mapping already exists with row-level lock
+    map_stmt = (
+        select(EmployeeSkillMap)
+        .where(
+            EmployeeSkillMap.employee_id == employee_id,
+            EmployeeSkillMap.skill_id == skill.id,
+        )
+        .with_for_update()
     )
     map_res = await session.execute(map_stmt)
     mapping = map_res.scalar_one_or_none()
 
     if mapping:
-        # Update existing proficiency level
         mapping.proficiency_level = payload.proficiency_level
     else:
-        # Create new mapping
-        mapping = EmployeeSkillMap(
-            employee_id=employee_id,
-            skill_id=skill.id,
-            proficiency_level=payload.proficiency_level,
-        )
-        session.add(mapping)
+        try:
+            async with session.begin_nested():
+                mapping = EmployeeSkillMap(
+                    employee_id=employee_id,
+                    skill_id=skill.id,
+                    proficiency_level=payload.proficiency_level,
+                )
+                session.add(mapping)
+                await session.flush()
+        except IntegrityError:
+            # Concurrent insert detected; serialize update
+            map_res = await session.execute(map_stmt)
+            mapping = map_res.scalar_one()
+            mapping.proficiency_level = payload.proficiency_level
 
     await session.commit()
     await session.refresh(mapping)
+
+    response.headers["ETag"] = f'"{mapping.updated_at.isoformat()}"'
 
     return EmployeeSkillRead(
         skill_id=skill.id,
@@ -114,19 +131,19 @@ async def assign_skill_to_employee(
 
 
 # ─────────────────────────────────────────────────────────────
-# 3. Update Existing Skill Proficiency Level
+# 3. Get Specific Employee Skill Assignment (with ETag)
 # ─────────────────────────────────────────────────────────────
-@router.put(
+@router.get(
     "/employees/{employee_id}/skills/{skill_id}",
     response_model=EmployeeSkillRead,
-    summary="Update the proficiency level of an assigned skill",
+    summary="Get details and ETag of a specific employee skill assignment",
 )
-async def update_skill_proficiency(
+async def get_employee_skill(
     employee_id: uuid.UUID,
     skill_id: uuid.UUID,
-    payload: EmployeeSkillUpdate,
+    response: Response,
     session: AsyncSession = Depends(get_db),
-    _role: str = Depends(require_hr),
+    _role: str = Depends(require_viewer),
 ) -> EmployeeSkillRead:
     map_stmt = select(EmployeeSkillMap).where(
         EmployeeSkillMap.employee_id == employee_id,
@@ -141,6 +158,79 @@ async def update_skill_proficiency(
             detail=f"Skill '{skill_id}' is not assigned to employee '{employee_id}'",
         )
 
+    skill_stmt = select(Skill).where(Skill.id == skill_id)
+    skill_res = await session.execute(skill_stmt)
+    skill = skill_res.scalar_one()
+
+    response.headers["ETag"] = f'"{mapping.updated_at.isoformat()}"'
+
+    return EmployeeSkillRead(
+        skill_id=skill.id,
+        skill_name=skill.name,
+        proficiency_level=mapping.proficiency_level,
+        created_at=mapping.created_at,
+        updated_at=mapping.updated_at,
+    )
+
+
+# ─────────────────────────────────────────────────────────────
+# 4. Update Existing Skill Proficiency Level (Two-Level Concurrency Check)
+# ─────────────────────────────────────────────────────────────
+@router.put(
+    "/employees/{employee_id}/skills/{skill_id}",
+    response_model=EmployeeSkillRead,
+    summary="Update skill proficiency level with optimistic (ETag) and pessimistic row locking",
+)
+async def update_skill_proficiency(
+    employee_id: uuid.UUID,
+    skill_id: uuid.UUID,
+    payload: EmployeeSkillUpdate,
+    response: Response,
+    if_match: Annotated[
+        str | None,
+        Header(
+            alias="If-Match",
+            description=(
+                "ETag from prior GET response for optimistic concurrency control "
+                "(e.g. '\"2026-10-26T14:00:00\"')"
+            ),
+        ),
+    ] = None,
+    session: AsyncSession = Depends(get_db),
+    _role: str = Depends(require_hr),
+) -> EmployeeSkillRead:
+    # Level 2 check: Database row-level exclusive lock (serializes concurrent writes)
+    map_stmt = (
+        select(EmployeeSkillMap)
+        .where(
+            EmployeeSkillMap.employee_id == employee_id,
+            EmployeeSkillMap.skill_id == skill_id,
+        )
+        .with_for_update()
+    )
+    map_res = await session.execute(map_stmt)
+    mapping = map_res.scalar_one_or_none()
+
+    if not mapping:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Skill '{skill_id}' is not assigned to employee '{employee_id}'",
+        )
+
+    # Level 1 check: Optimistic Concurrency Control (ETag / If-Match verification)
+    current_etag = f'"{mapping.updated_at.isoformat()}"'
+    if if_match is not None:
+        clean_if_match = if_match.strip().strip('"')
+        clean_current_etag = mapping.updated_at.isoformat()
+        if clean_if_match != clean_current_etag:
+            raise HTTPException(
+                status_code=status.HTTP_412_PRECONDITION_FAILED,
+                detail=(
+                    "Precondition Failed: Resource was modified by another request. "
+                    f"Current ETag is {current_etag}. Please refresh and retry."
+                ),
+            )
+
     mapping.proficiency_level = payload.proficiency_level
     await session.commit()
     await session.refresh(mapping)
@@ -148,6 +238,8 @@ async def update_skill_proficiency(
     skill_stmt = select(Skill).where(Skill.id == skill_id)
     skill_res = await session.execute(skill_stmt)
     skill = skill_res.scalar_one()
+
+    response.headers["ETag"] = f'"{mapping.updated_at.isoformat()}"'
 
     return EmployeeSkillRead(
         skill_id=skill.id,
