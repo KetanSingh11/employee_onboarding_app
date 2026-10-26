@@ -59,6 +59,8 @@ A multi-step employee onboarding workflow engine with REST API, CSV batch ingest
 | ADR-29 | No pub-sub | BackgroundTasks is sufficient; direct calls correct for monolith | RabbitMQ/Kafka only needed for multi-service fan-out; not applicable here |
 | ADR-30 | Database query pushdown | Skill, level, and pagination evaluated via SQL subquery and LIMIT/OFFSET | Prevents OOM crashes on 1M+ rows; index-backed performance |
 | ADR-31 | Concurrent race-safety | Savepoints (`begin_nested`) & `IntegrityError` catches on concurrent CSV rows | Graceful deduplication without crashing background batches |
+| ADR-32 | Concurrency Guard (OCC & Row Lock) | Two-level concurrency check: `If-Match` ETag (OCC) + `.with_for_update()` row locking | Prevents lost update races on skill edits; returns 412 on stale edits |
+| ADR-33 | File Upload Size & MIME Guard | Non-blocking chunked streaming with configurable `MAX_UPLOAD_SIZE_MB` (10MB) & MIME check | Rejects oversized files (413) or bad types (415) before buffering to RAM |
 
 ---
 

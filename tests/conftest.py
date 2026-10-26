@@ -14,6 +14,7 @@ import employee_onboarding_app.api.employees as emp_mod
 import employee_onboarding_app.api.workflows as wf_mod
 import employee_onboarding_app.database as db_mod
 import employee_onboarding_app.main as main_mod
+import employee_onboarding_app.middleware as mid_mod
 from employee_onboarding_app.api.deps import get_db
 from employee_onboarding_app.config import settings
 from employee_onboarding_app.database import Base
@@ -42,6 +43,7 @@ db_mod.AsyncSessionLocal = TestingSessionLocal
 main_mod.AsyncSessionLocal = TestingSessionLocal
 emp_mod.AsyncSessionLocal = TestingSessionLocal
 wf_mod.AsyncSessionLocal = TestingSessionLocal
+mid_mod.AsyncSessionLocal = TestingSessionLocal
 
 
 @pytest_asyncio.fixture(scope="session", autouse=True)

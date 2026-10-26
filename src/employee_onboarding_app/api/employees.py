@@ -22,6 +22,7 @@ from employee_onboarding_app.api.deps import (
     require_hr,
     require_viewer,
 )
+from employee_onboarding_app.config import settings
 from employee_onboarding_app.database import AsyncSessionLocal
 from employee_onboarding_app.models import (
     BatchRun,
@@ -105,16 +106,53 @@ async def import_employees_csv(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     simulate_failure: Annotated[str | None, Header(alias="X-Simulate-Failure")] = None,
+    idempotency_key: Annotated[
+        str | None,
+        Header(
+            alias="Idempotency-Key",
+            description="Optional client-generated UUID for idempotency protection on retries",
+        ),
+    ] = None,
     session: AsyncSession = Depends(get_db),
     _role: str = Depends(require_hr),
 ) -> BatchIngestAcceptedResponse:
     if not file.filename or not file.filename.endswith((".csv", ".txt")):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Uploaded file must be a valid .csv file",
+            detail="Uploaded file must be a valid .csv or .txt file",
         )
 
-    content_bytes = await file.read()
+    # Validate Content-Type if present
+    allowed_content_types = {
+        "text/csv",
+        "text/plain",
+        "application/vnd.ms-excel",
+        "application/csv",
+        "text/x-csv",
+        "application/octet-stream",
+    }
+    if file.content_type and file.content_type.lower() not in allowed_content_types:
+        raise HTTPException(
+            status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+            detail=f"Unsupported file type '{file.content_type}'. Must be CSV or plain text.",
+        )
+
+    # Non-blocking chunked streaming with configurable size cap (prevents OOM on large files)
+    max_bytes = settings.MAX_UPLOAD_SIZE_MB * 1024 * 1024
+    chunks: list[bytes] = []
+    total_bytes = 0
+    chunk_size = 64 * 1024  # 64 KB per chunk
+
+    while chunk := await file.read(chunk_size):
+        total_bytes += len(chunk)
+        if total_bytes > max_bytes:
+            raise HTTPException(
+                status_code=status.HTTP_413_CONTENT_TOO_LARGE,
+                detail=f"File exceeds maximum allowed limit of {settings.MAX_UPLOAD_SIZE_MB}MB",
+            )
+        chunks.append(chunk)
+
+    content_bytes = b"".join(chunks)
     try:
         csv_text = content_bytes.decode("utf-8")
     except UnicodeDecodeError as err:
@@ -254,6 +292,13 @@ async def get_employee_by_id(
 )
 async def trigger_offboarding(
     employee_id: uuid.UUID,
+    idempotency_key: Annotated[
+        str | None,
+        Header(
+            alias="Idempotency-Key",
+            description="Optional client-generated UUID for idempotency protection on retries",
+        ),
+    ] = None,
     session: AsyncSession = Depends(get_db),
     _role: str = Depends(require_admin),
 ) -> dict[str, str]:

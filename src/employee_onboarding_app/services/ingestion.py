@@ -1,3 +1,4 @@
+import asyncio
 import csv
 import io
 import logging
@@ -198,7 +199,7 @@ async def process_batch_ingestion(
         return
 
     try:
-        valid_records, errors = parse_and_validate_csv_content(csv_content)
+        valid_records, errors = await asyncio.to_thread(parse_and_validate_csv_content, csv_content)
     except Exception as exc:
         batch.status = BatchStatus.FAILED
         batch.report = [{"error": str(exc)}]

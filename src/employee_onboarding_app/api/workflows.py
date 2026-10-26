@@ -112,8 +112,8 @@ async def retry_failed_workflow(
     session: AsyncSession = Depends(get_db),
     _role: str = Depends(require_hr),
 ) -> WorkflowRetryResponse:
-    # 1. Fetch failed workflow
-    stmt = select(WorkflowExecution).where(WorkflowExecution.id == workflow_id)
+    # 1. Fetch failed workflow with row lock to serialize concurrent retry calls
+    stmt = select(WorkflowExecution).where(WorkflowExecution.id == workflow_id).with_for_update()
     res = await session.execute(stmt)
     old_wf = res.scalar_one_or_none()
     if not old_wf:

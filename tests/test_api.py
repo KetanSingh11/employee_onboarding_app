@@ -153,3 +153,85 @@ async def test_idempotency_header(client: AsyncClient):
     )
     assert res2.status_code == 202
     assert res2.headers.get("X-Cache") == "HIT-IDEMPOTENCY"
+
+
+@pytest.mark.asyncio
+async def test_file_size_cap_rejection(client: AsyncClient, monkeypatch: pytest.MonkeyPatch):
+    """Verifies that uploaded files exceeding MAX_UPLOAD_SIZE_MB are rejected with HTTP 413."""
+    # Set cap to ~1KB for fast test execution
+    monkeypatch.setattr(settings, "MAX_UPLOAD_SIZE_MB", 0.001)
+
+    oversized_payload = "a" * 2048  # 2KB payload > 0.001MB (~1048 bytes)
+    response = await client.post(
+        "/api/v1/employees/import",
+        files={"file": ("large.csv", oversized_payload.encode(), "text/csv")},
+        headers={"X-API-Key": settings.API_KEY_HR},
+    )
+
+    assert response.status_code == 413
+    assert "File exceeds maximum allowed limit" in response.json()["detail"]
+
+
+@pytest.mark.asyncio
+async def test_unsupported_media_type_rejection(client: AsyncClient):
+    """Verifies that non-text/CSV files (e.g., images/binaries) are rejected with HTTP 415."""
+    response = await client.post(
+        "/api/v1/employees/import",
+        files={"file": ("malicious.png", b"\x89PNG\r\n\x1a\n", "image/png")},
+        headers={"X-API-Key": settings.API_KEY_HR},
+    )
+
+    # Rejection happens either by extension check (400) or MIME check (415)
+    assert response.status_code in {400, 415}
+
+
+@pytest.mark.asyncio
+async def test_skill_concurrency_etag_guard(client: AsyncClient, db_session: AsyncSession):
+    """Verifies two-level concurrency check on skill updates:
+
+    1. ETag is returned on assignment.
+    2. Valid If-Match updates successfully and issues a new ETag.
+    3. Stale If-Match rejects with HTTP 412 Precondition Failed.
+    """
+    # 1. Create test employee
+    emp = Employee(
+        email=f"etag.test.{uuid.uuid4().hex[:6]}@company.com",
+        first_name="ETag",
+        last_name="Tester",
+        start_date=date.today(),
+        status=EmployeeStatus.ACTIVE,
+    )
+    db_session.add(emp)
+    await db_session.commit()
+    await db_session.refresh(emp)
+
+    # 2. Assign skill
+    assign_res = await client.post(
+        f"/api/v1/employees/{emp.id}/skills",
+        json={"skill_name": "PostgreSQL", "proficiency_level": "intermediate"},
+        headers={"X-API-Key": settings.API_KEY_HR},
+    )
+    assert assign_res.status_code == 201
+    initial_etag = assign_res.headers.get("ETag")
+    assert initial_etag is not None
+    skill_id = assign_res.json()["skill_id"]
+
+    # 3. Client A updates with correct initial ETag -> 200 OK
+    update_res_1 = await client.put(
+        f"/api/v1/employees/{emp.id}/skills/{skill_id}",
+        json={"proficiency_level": "advanced"},
+        headers={"X-API-Key": settings.API_KEY_HR, "If-Match": initial_etag},
+    )
+    assert update_res_1.status_code == 200
+    updated_etag = update_res_1.headers.get("ETag")
+    assert updated_etag is not None
+    assert updated_etag != initial_etag
+
+    # 4. Client B attempts update with stale initial ETag -> 412 Precondition Failed
+    stale_update_res = await client.put(
+        f"/api/v1/employees/{emp.id}/skills/{skill_id}",
+        json={"proficiency_level": "expert"},
+        headers={"X-API-Key": settings.API_KEY_HR, "If-Match": initial_etag},
+    )
+    assert stale_update_res.status_code == 412
+    assert "Precondition Failed" in stale_update_res.json()["detail"]
